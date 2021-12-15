@@ -1,0 +1,7 @@
+---
+- hosts: master
+  become: yes
+  tasks:
+  - name: kubeadm reset
+    shell:
+      kubeadm reset

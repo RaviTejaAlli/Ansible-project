@@ -1,0 +1,28 @@
+- hosts: all
+  become: true
+  tasks:
+  - name: Disable SWAP since kubernetes can't work with swap enabled (1/2)
+    shell: |
+      swapoff -a
+
+  - name: Disable SWAP in fstab since kubernetes can't work with swap enabled (2/2)
+    replace:
+      path: /etc/fstab
+      regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+      replace: '# \1'
+
+  - name: Letting iptables see bridged traffic
+    shell: |
+      sudo modprobe br_netfilter
+      cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+      br_netfilter
+      EOF
+      cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      EOF
+      sudo sysctl --system
+
+
+
+

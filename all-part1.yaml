@@ -1,0 +1,177 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  
+  - name: Update in ubuntu
+    apt:
+      update_cache: yes
+
+  - name: upgrade in ubuntu
+    become_user: root
+    apt:
+      upgrade: yes
+      state: latest
+
+  - name: clean in ubuntu
+    apt:
+      autoclean: yes
+      autoremove: yes
+
+  - name: Remove older docker versions if present
+    apt:
+      pkg: '{{item}}'
+      state: absent
+    with_items:
+    - docker
+    - docker-engine
+    - docker.io
+    - containerd
+    - runc
+
+  - name: Install needed packages
+    apt:
+      update_cache: yes
+      pkg:
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+
+  - name: Add Docker's official apt key.
+    apt_key:
+      url: https://download.docker.com/linux/ubuntu/gpg
+      id: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+      state: present
+    register: add_key
+    ignore_errors: true
+
+  - name: Add Docker stable repository.
+    apt_repository:
+      repo: "deb [arch=amd64] https://download.docker.com/linux/{{ ansible_distribution|lower }} {{ ansible_distribution_release }} stable"
+      state: present
+      update_cache: yes
+
+  - name: Install Docker
+    apt:
+      name: "{{ item }}"
+      state: latest
+    with_items:
+    - docker-ce
+    - docker-ce-cli
+    - containerd.io
+
+  - name: Creating docker group
+    ansible.builtin.group:
+      name: docker
+      state: present
+
+  - name: Adding user to docker group
+    shell: |
+      sudo usermod -aG docker $USER
+      sudo mkdir /etc/docker
+      cat <<EOF | sudo tee /etc/docker/daemon.json
+      {
+        "exec-opts": ["native.cgroupdriver=systemd"],
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "100m"
+        },
+        "storage-driver": "overlay2"
+      }
+      EOF
+
+  - name: Restart service docker
+    ansible.builtin.systemd:
+      enabled: yes
+      state: restarted
+      daemon_reload: yes
+      name: docker
+
+  - name: Disable SWAP since kubernetes can't work with swap enabled (1/2)
+    shell: |
+      swapoff -a
+
+  - name: Disable SWAP in fstab since kubernetes can't work with swap enabled (2/2)
+    replace:
+      path: /etc/fstab
+      regexp: '^([^#].*?\sswap\s+sw\s+.*)$'
+      replace: '# \1'
+
+  - name: Letting iptables see bridged traffic
+    shell: |
+      sudo modprobe br_netfilter
+      cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
+      br_netfilter
+      EOF
+      cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+      net.bridge.bridge-nf-call-ip6tables = 1
+      net.bridge.bridge-nf-call-iptables = 1
+      EOF
+      sudo sysctl --system
+
+  - name: create the 'master' user
+    user: name=master append=yes state=present createhome=yes shell=/bin/bash
+
+  - name: allow 'master' to have passwordless sudo
+    lineinfile:
+      dest: /etc/sudoers
+      line: 'master ALL=(ALL) NOPASSWD: ALL'
+      validate: 'visudo -cf %s'
+
+  - name: set up authorized keys for the master user
+    authorized_key: user=master key="{{item}}"
+    with_file:
+    - ~/.ssh/id_rsa.pub
+
+  - name: packages for kubeadm,kubectl
+    apt:
+      update_cache: yes
+      pkg: "{{ item }}"
+      state: latest
+    with_items:
+    - apt-transport-https
+    - ca-certificates
+    - curl
+
+  - name: Download the Google Cloud SDK package repository signing key
+    ansible.builtin.get_url:
+      url: https://packages.cloud.google.com/apt/doc/apt-key.gpg
+      dest: /usr/share/keyrings/kubernetes-archive-keyring.gpg
+
+  - name: Add Google Cloud SDK package repository source
+    ansible.builtin.apt_repository:
+      filename: /etc/apt/sources.list.d/kubernetes.list
+      repo: "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main"
+      update_cache: yes
+
+  - name: Install kubeadm,kubectl,kubelet
+    apt:
+      name: "{{ item }}"
+      state: latest
+    with_items:
+    - kubelet
+    - kubeadm
+    - kubelet
+
+  - name: Hold kubeadm
+    dpkg_selections:
+      name: kubelet
+      selection: hold
+
+  - name: Hold kubeadm
+    dpkg_selections:
+      name: kubeadm
+      selection: hold
+
+  - name: Hold kubeadm
+    dpkg_selections:
+      name: kubectl
+      selection: hold
+
+  - name: Reboot all the kubernetes nodes.
+    reboot:
+      post_reboot_delay: 10
+      reboot_timeout: 40
+      connect_timeout: 60
+      test_command: uptime
